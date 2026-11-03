@@ -28,16 +28,17 @@ Designed to transition academic ROS manipulators into predictable, industrially 
 
 - [Key Features](#-key-features)
 - [System Architecture](#-system-architecture)
+- [Kinematic Transform Pipeline & Frame Tree](#-kinematic-transform-pipeline--frame-tree)
 - [Robot Kinematic Specification](#-robot-kinematic-specification)
 - [Software Stack & Package Ecosystem](#-software-stack--package-ecosystem)
-- [Inverse Kinematics & Motion Planning Pipelines](#-inverse-kinematics--motion-planning-pipelines)
-- [Control Architecture & ROS Interface](#-control-architecture--ros-interface)
-- [3D Perception & OctoMap Planning Scene](#-3d-perception--octomap-planning-scene)
+- [Motion Planning & Inverse Kinematics Pipeline](#-motion-planning--inverse-kinematics-pipeline)
+- [Closed-Loop Control & ROS Hardware Interface](#-closed-loop-control--ros-hardware-interface)
+- [Real-Time 3D Perception & OctoMap Pipeline](#-real-time-3d-perception--octomap-pipeline)
 - [Autonomous Pick-and-Place State Machine](#-autonomous-pick-and-place-state-machine)
-- [Multi-Tiered Safety & Emergency Stop](#-multi-tiered-safety--emergency-stop)
+- [Multi-Tiered Safety & Emergency Stop Sequence](#-multi-tiered-safety--emergency-stop-sequence)
 - [Physical Hardware Implementation](#-physical-hardware-implementation)
 - [Quickstart & Launch Recipes](#-quickstart--launch-recipes)
-- [Continuous Integration & Validation](#-continuous-integration--validation)
+- [End-to-End CI/CD & Verification Workflow](#-end-to-end-cicd--verification-workflow)
 - [Troubleshooting & Diagnostics](#-troubleshooting--diagnostics)
 - [Engineering Documentation](#-engineering-documentation)
 - [License & Authorship](#-license--authorship)
@@ -111,6 +112,25 @@ flowchart TD
 
 ---
 
+## 📐 Kinematic Transform Pipeline & Frame Tree
+
+The robot kinematics are modeled via a strictly ordered homogeneous transform tree ($4 \times 4$ transform matrices) from the global `world` frame to the tool center point (`finger_joint`):
+
+```mermaid
+flowchart LR
+    W["world"] -->|Fixed: 0, 0, 0.75m| B["base_link"]
+    B -->|BJ (Rot Z)<br/>0, 0, 0.1181m<br/>[-120°, +120°]| L1["BJ_Link"]
+    L1 -->|SJ (Rot Z)<br/>0, 0.1157, 0.0775m<br/>[-90°, +90°]| L2["SJ_Link"]
+    L2 -->|EJ (Rot Z)<br/>0, 0, 0.35575m<br/>[-225°, +60°]| L3["EJ_Link"]
+    L3 -->|W1J (Rot Z)<br/>0.0695, -0.1157, 0m<br/>[-90°, +90°]| L4["W1J_Link"]
+    L4 -->|W2J (Rot Z)<br/>0.28625, 0, 0m<br/>[-60°, +150°]| L5["W2J_Link"]
+    L5 -->|W3J (Rot Z)<br/>0.0635, 0, 0.1200m<br/>[-180°, +180°]| L6["W3J_Link"]
+    L6 -->|Fixed Flange<br/>0.0675, 0, 0m| EEF["EEF_Link"]
+    EEF -->|finger_joint (Prismatic Z)<br/>0.000 to 0.040m| GRIP["Robotiq 2F-140 Jaw"]
+```
+
+---
+
 ## 🦾 Robot Kinematic Specification
 
 The OWR manipulator is a 6-DOF articulated serial arm with 6 revolute joints (all rotating about their respective local Z-axes) coupled with a Robotiq 2F-140 prismatic parallel gripper. Total reach extends to **~560 mm** from base origin to the end-effector mounting flange.
@@ -137,29 +157,9 @@ The OWR manipulator is a 6-DOF articulated serial arm with 6 revolute joints (al
   <img src="images/kinematic_chain.png" alt="Kinematic Chain Diagram" width="720">
 </p>
 
-### URDF Fixed-Transform Chain & Zero-Pose Verification
+### Forward Kinematics Zero-Pose Derivation
 
-The manipulator kinematic structure is defined as a fixed XYZ + RPY homogeneous transformation chain from parent link to child link:
-
-```
-world ──[fixed: 0, 0, 0.75m]──> base_link
-                                  │
-                         BJ ──────┴──> (0.0000, 0.0000, 0.1181m)
-                                  │
-                         SJ ──────┴──> (0.0000, 0.1157, 0.0775m)
-                                  │
-                         EJ ──────┴──> (0.0000, 0.0000, 0.35575m)
-                                  │
-                        W1J ──────┴──> (0.0695, -0.1157, 0.0000m)
-                                  │
-                        W2J ──────┴──> (0.28625, 0.0000, 0.0000m)
-                                  │
-                        W3J ──────┴──> (0.0635, 0.0000, 0.1200m)
-                                  │
-                      EEF_Link ───┴──> (0.0675, 0.0000, 0.0000m) [fixed]
-```
-
-At zero configuration ($\theta_i = 0^\circ$ for all joints), the end-effector sits at:
+At zero configuration ($\theta_i = 0^\circ$ for all joints), chaining the URDF link offsets yields the precise end-effector world position:
 $$\mathbf{P}_{\text{EEF}}^{\text{world}} = \begin{bmatrix} 0 + 0 + 0 + 0.0695 + 0.28625 + 0.0635 + 0.0675 \\ 0 + 0.1157 + 0 - 0.1157 + 0 + 0 + 0 \\ 0.75 + 0.1181 + 0.0775 + 0.35575 + 0 + 0.12 + 0 \end{bmatrix} = \begin{bmatrix} 0.48675\text{ m} \\ 0.00000\text{ m} \\ 1.42135\text{ m} \end{bmatrix}$$
 
 ---
@@ -189,39 +189,81 @@ $$\mathbf{P}_{\text{EEF}}^{\text{world}} = \begin{bmatrix} 0 + 0 + 0 + 0.0695 + 
 
 ---
 
-## ⚡ Inverse Kinematics & Motion Planning Pipelines
+## ⚡ Motion Planning & Inverse Kinematics Pipeline
+
+The motion planning pipeline translates high-level task goals into dynamically safe, collision-free joint trajectories:
+
+```mermaid
+flowchart TD
+    GOAL["Motion Goal Received<br/>(Target Pose / Joint Angles / Waypoints)"] --> VALIDATE{"Workspace & Joint<br/>Limits Validation"}
+    
+    VALIDATE -- Out of Bounds --> REJECT["Reject Goal & Return Error Code"]
+    VALIDATE -- In Bounds --> SELECTOR{"Select Planning<br/>Pipeline"}
+    
+    SELECTOR -- Deterministic Motion --> PILZ["Pilz Industrial Planner<br/>• LIN (Cartesian Straight)<br/>• PTP (Point-to-Point)<br/>• CIRC (Circular Blend)"]
+    SELECTOR -- Cluttered / Obstacles --> OMPL["OMPL Sampling Planner<br/>• RRTConnect / RRT*<br/>• PRM* / BKPIECE"]
+    SELECTOR -- Trajectory Smoothing --> OPT["Optimization Planners<br/>• CHOMP (Hamiltonian Covariant)<br/>• STOMP (Stochastic Optimization)"]
+
+    PILZ & OMPL & OPT --> IK_SOLVE["Analytical Inverse Kinematics<br/>(IKFast 6-DOF Closed-Form Solver)"]
+    
+    IK_SOLVE --> TIME_PARAM["Time Parameterization<br/>(IPTP / Time-Optimal Trajectory Generation)<br/>Velocity & Acceleration Bounds Enforced"]
+    
+    TIME_PARAM --> COLLISION{"Dynamic Collision Check<br/>against Planning Scene Monitor<br/>(OctoMap + SRDF Collision Matrix)"}
+    
+    COLLISION -- Collision Detected --> REPLAN{"Replanning Permitted?"}
+    REPLAN -- Yes --> SELECTOR
+    REPLAN -- No --> FAIL["Abort Trajectory"]
+    
+    COLLISION -- Path Clear --> EXECUTE["Publish JointTrajectory to Action Server<br/>(/arm_manipulator_controller/follow_joint_trajectory)"]
+```
 
 <p align="center">
   <img src="images/moveit_pipeline.png" alt="MoveIt Motion Planning Pipeline" width="760">
 </p>
 
 ### Analytical IKFast Plugin Configuration
-Numerical inverse kinematics solvers (such as default KDL) are prone to iteration timeouts, drift near singularities, and non-deterministic planning durations. This repository features a compiled **IKFast analytical solver**:
-
 - **Plugin Identifier:** `owr_gripper_arm_manipulator_kinematics/IKFastKinematicsPlugin`
 - **Search Resolution:** $0.005\text{ rad}$
 - **Solve Timeout:** $0.005\text{ s}$ ($5\text{ ms}$)
-- **Characteristics:** Deterministic closed-form algebraic solution; yields instantaneous inverse kinematic solutions without numerical divergence.
-
-### Multi-Pipeline Motion Planning Framework
-
-MoveIt is pre-configured with four hot-swappable motion planning pipelines:
-
-1. **Pilz Industrial Motion Planner (`pilz_industrial_motion_planner`):**
-   - Implements deterministic industrial robot motion standards.
-   - Generates exact Cartesian Linear paths (`LIN`), Point-to-Point joint motions (`PTP`), and Circular blend curves (`CIRC`).
-   - Ideal for predictable palletizing and precision insertion tasks.
-2. **OMPL (`ompl_planning_pipeline`):**
-   - High-dimensional sampling-based algorithms (`RRTConnect`, `RRT*`, `PRM*`, `BKPIECE`).
-   - Best suited for navigating highly cluttered pick-and-place bins and obstacle-dense workcells.
-3. **CHOMP (`chomp_planning_pipeline`):**
-   - Covariant Hamiltonian Optimization for Motion Planning. Generates smooth, dynamically optimal trajectory profiles.
-4. **STOMP (`stomp_planning_pipeline`):**
-   - Stochastic Trajectory Optimization for Motion Planning. Handles arbitrary cost functions without gradient calculation.
+- **Advantages:** Sub-millisecond determinism without numerical singularities or seed sensitivity.
 
 ---
 
-## 🎛 Control Architecture & ROS Interface
+## 🎛 Closed-Loop Control & ROS Hardware Interface
+
+Real-time feedback control operates in closed loop between `move_group`, `ros_control`, and the physical or simulated plant:
+
+```mermaid
+flowchart TD
+    subgraph MoveGroup["MoveIt! Core"]
+        TRAJ["Trajectory Generator<br/>(trajectory_msgs/JointTrajectory)"]
+    end
+
+    subgraph ROSControl["ros_control Execution Stack"]
+        ACTION["FollowJointTrajectory Action Server<br/>(PositionJointInterface @ 50 Hz)"]
+        PID["PID Position Feedback Loops<br/>(e(t) = q_desired - q_actual)"]
+        SPAWNER["Controller Manager"]
+    end
+
+    subgraph Plant["Actuation Plant (Gazebo / Hardware)"]
+        GZ_PLUGIN["gazebo_ros_control Plugin<br/>(Hardware Transmission Abstraction)"]
+        MOTORS["6x NEMA 17 Steppers + RAMPS 1.4<br/>OR Gazebo Physics Joint Solvers"]
+    end
+
+    subgraph Feedback["Telemetry & State Estimation"]
+        JSC["JointStateController<br/>(Publishes /joint_states @ 50 Hz)"]
+        RSP["robot_state_publisher<br/>(Broadcasts TF Transform Tree)"]
+        SAFETY_NODE["safety_node.py<br/>(Watchdog Monitoring @ 10 Hz)"]
+    end
+
+    TRAJ -->|Execute Goal| ACTION
+    ACTION --> PID
+    PID -->|PWM / Position Commands| GZ_PLUGIN
+    GZ_PLUGIN --> MOTORS
+    MOTORS -->|Physical Joint Position| JSC
+    JSC -->|/joint_states| RSP & SAFETY_NODE
+    JSC -->|Feedback q_actual| ACTION
+```
 
 <p align="center">
   <img src="images/controller_stack.png" alt="Controller Stack Diagram" width="740">
@@ -229,28 +271,7 @@ MoveIt is pre-configured with four hot-swappable motion planning pipelines:
   <img src="images/ros_interface.png" alt="ROS Interface Diagram" width="740">
 </p>
 
-### Active `ros_control` Controllers
-
-| Controller Name | Controller Type | Managed Joints | Default Action / Feedback Topic |
-|:---|:---|:---|:---|
-| `arm_manipulator_controller` | `position_controllers/JointTrajectoryController` | `BJ`, `SJ`, `EJ`, `W1J`, `W2J`, `W3J` | `/arm_manipulator_controller/follow_joint_trajectory` |
-| `gripper_trajectory_controller` | `position_controllers/JointTrajectoryController` | `finger_joint` | `/gripper_trajectory_controller/follow_joint_trajectory` |
-| `joint_state_controller` | `joint_state_controller/JointStateController` | All links | `/joint_states` (Published @ 50 Hz) |
-
-### Real-Time ROS Topic Interfaces
-
-| Topic Name | Message Type | Rate / Bandwidth | Functional Description |
-|:---|:---|:---:|:---|
-| `/joint_states` | `sensor_msgs/JointState` | $50\text{ Hz}$ | Real-time broadcast of all active joint positions, velocities, and efforts. |
-| `/emergency_stop` | `std_msgs/Bool` | Event-driven / $10\text{ Hz}$ | Bidirectional, latched hardware/software emergency stop signal. |
-| `/arm_manipulator_controller/state` | `control_msgs/JointTrajectoryControllerState` | $50\text{ Hz}$ | Desired, actual, and error vectors for all 6 arm joints. |
-| `/camera/point_cloud` | `sensor_msgs/PointCloud2` | $30\text{ Hz}$ | Raw point cloud stream generated by simulated RGB-D perception head. |
-| `/camera/filtered_cloud` | `sensor_msgs/PointCloud2` | $10\text{ Hz}$ | Downsampled point cloud filtered through PCL VoxelGrid (1 cm leaf). |
-| `/world_octomap` | `octomap_msgs/Octomap` | $10\text{ Hz}$ | Live 3D occupancy grid consumed by the MoveIt Planning Scene Monitor. |
-
 ### Tuned Joint PID Control Profiles
-
-To eliminate oscillation and steady-state error under heavy gravitational loading, joints are tuned using individual PID loops in `owr_gazebo/config/gazebo_ros_control_params.yaml`:
 
 <p align="center">
   <img src="images/pid_control.png" alt="PID Tuning Response" width="680">
@@ -267,9 +288,26 @@ To eliminate oscillation and steady-state error under heavy gravitational loadin
 
 ---
 
-## 👁 3D Perception & OctoMap Planning Scene
+## 👁 Real-Time 3D Perception & OctoMap Pipeline
 
-The workcell dynamically maps its surrounding environment in real time using an eye-to-hand RGB-D sensor streaming into a volumetric OctoMap:
+The system builds an adaptive 3D collision map from raw sensor point clouds:
+
+```mermaid
+flowchart LR
+    CAM["RGB-D Depth Camera<br/>(Asus Xtion / Kinect Sim)"] -->|Raw PointCloud2 @ 30 Hz| RAW["/camera/point_cloud"]
+    
+    RAW --> PASS["PCL PassThrough Filter<br/>Bounding Box: X, Y, Z Workspace"]
+    
+    PASS --> VOXEL["PCL VoxelGrid Filter<br/>Downsample Leaf: 1 cm (0.01m)"]
+    
+    VOXEL --> SELF["Self-Collision Masking<br/>(URDF Body Envelope Subtracted via TF)"]
+    
+    SELF --> OCTO["OctoMap Server Node<br/>3D Occupancy Octree<br/>Resolution: 5 cm (0.05m)"]
+    
+    OCTO -->|/world_octomap @ 10 Hz| SCENE["MoveIt! PlanningSceneMonitor<br/>(Dynamic Collision Environment)"]
+    
+    SCENE --> REPLAN["Real-Time Collision Avoidance<br/>& Dynamic Replanning"]
+```
 
 <p align="center">
   <img src="images/perception_detail.png" alt="Perception Pipeline Architecture" width="760">
@@ -277,79 +315,104 @@ The workcell dynamically maps its surrounding environment in real time using an 
   <img src="images/octomap_generated_from_processed_pointcloud_data.png" alt="OctoMap Generation Preview" width="760">
 </p>
 
-1. **Depth Stream Acquisition:** The simulated sensor emits high-density raw 3D point clouds on `/camera/point_cloud` at 30 Hz.
-2. **Voxel Grid Downsampling:** A real-time node filter downsamples the raw stream using an axis-aligned bounding voxel grid with a leaf size of **$1\text{ cm}$** ($0.01\text{ m}$), reducing processing overhead by > 75%.
-3. **OctoMap Volumetric Integration:** The filtered cloud is projected into an OctoMap occupancy tree at a voxel resolution of **$5\text{ cm}$** ($0.05\text{ m}$).
-4. **Dynamic Collision Geometry:** Voxels within the robot's self-filtering envelope are masked; remaining occupied cells are automatically appended to the MoveIt collision world, enabling collision-free trajectory re-routing around dynamic obstacles.
-
 ---
 
 ## 🔄 Autonomous Pick-and-Place State Machine
 
-The repository includes a production-grade pick-and-place application node (`owr_manipulation/src/PickNPlace.cpp`) designed as an 8-stage deterministic state machine:
+The autonomous pick-and-place pipeline (`owr_manipulation/src/PickNPlace.cpp`) is formalized as a deterministic finite state machine with automatic collision object attachment:
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE : System Ready
+    
+    IDLE --> APPROACH_TARGET : Goal Received & IK Succeeded
+    APPROACH_TARGET --> DESCEND_PREGRASP : Pilz PTP Move Complete
+    
+    DESCEND_PREGRASP --> CLOSE_GRIPPER : Linear Cartesian Descend (LIN)
+    
+    CLOSE_GRIPPER --> ATTACH_OBJECT : Prismatic Jaw Clamped (Effort Threshold)
+    
+    ATTACH_OBJECT --> LIFT_RETREAT : Planning Scene Updated (Object Attached)
+    
+    LIFT_RETREAT --> TRANSPORT_PAYLOAD : Cartesian Vertical Lift (+0.15m Z)
+    
+    TRANSPORT_PAYLOAD --> PLACE_POSITION : Industrial Path Transit (PTP/LIN)
+    
+    PLACE_POSITION --> OPEN_GRIPPER : Target Coordinate Reached
+    
+    OPEN_GRIPPER --> DETACH_OBJECT : Prismatic Jaw Fully Opened (40mm)
+    
+    DETACH_OBJECT --> RETREAT_HOME : Scene Updated (Object Detached)
+    
+    RETREAT_HOME --> IDLE : Home Pose Restored
+
+    APPROACH_TARGET --> FAULT_RECOVERY : Planning Failure
+    DESCEND_PREGRASP --> FAULT_RECOVERY : Cartesian IK Failure
+    TRANSPORT_PAYLOAD --> FAULT_RECOVERY : Collision / Trajectory Abort
+    
+    FAULT_RECOVERY --> RETREAT_HOME : Safe Abort Vector Executed
+
+    state FAULT_RECOVERY {
+        [*] --> StopMotion
+        StopMotion --> ClearSceneDiff
+        ClearSceneDiff --> OpenGripperSafe
+    }
+```
 
 <p align="center">
   <img src="images/pick_place_sm.png" alt="Pick and Place State Machine" width="620">
 </p>
 
-```
-  [1. Approach Target]
-          │
-          ▼
-   [2. Descend / Pre-Grasp]
-          │
-          ▼
-   [3. Close Gripper & Grasp]
-          │
-          ▼
-   [4. Attach Object to Scene]
-          │
-          ▼
-   [5. Lift & Post-Grasp Retreat]
-          │
-          ▼
-   [6. Transport to Destination]
-          │
-          ▼
-   [7. Descend & Release Gripper]
-          │
-          ▼
-   [8. Detach Object & Retreat to Home]
-```
-
-- **Collision Scene Synchronization:** The node dynamically issues `AttachedCollisionObject` and `CollisionObject` diff messages via `moveit::planning_interface::PlanningSceneInterface`, preventing false-positive self-collision alarms when lifting heavy objects.
-- **Fail-Safe Recovery:** If IK fails during Cartesian descent or grasp verification times out, the node executes a deterministic safe-retreat vector back to the neutral home pose.
-
 ---
 
-## 🛡 Multi-Tiered Safety & Emergency Stop
+## 🛡 Multi-Tiered Safety & Emergency Stop Sequence
+
+The safety layer continuously cross-verifies joint positions against physical constraints and brokers latched emergency stops:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant GZ as Gazebo / Physical Encoders
+    participant JSC as Joint State Controller
+    participant SN as Safety Watchdog (safety_node.py @ 10Hz)
+    participant ES as /emergency_stop (Latched Topic)
+    participant RC as ros_control Action Server
+    participant APP as PickNPlace Orchestrator
+
+    loop Every 20 ms (50 Hz)
+        GZ->>JSC: Raw Joint Encoders (Position, Velocity, Effort)
+        JSC->>SN: Broadcast /joint_states
+    end
+
+    Note over SN: Margin Check: θ_lower + 0.05rad <= θ <= θ_upper - 0.05rad
+
+    alt Normal Operation
+        SN-->>ES: /emergency_stop remains FALSE
+        APP->>RC: Dispatch Trajectory Waypoint
+        RC->>GZ: Actuate Motors
+    else Boundary Margin Exceeded OR Operator E-Stop Triggered
+        SN->>ES: Publish /emergency_stop = TRUE (Latched)
+        par Cancel Motion
+            ES->>RC: Cancel All Active Action Goals
+            RC->>GZ: Command Instant Zero-Velocity Brake
+        and Abort Task
+            ES->>APP: Abort Active Pick & Place Sequence
+        and Hardware Interlock
+            ES->>GZ: Sever Main 12V DC Motor Power Rail
+        end
+        Note over SN,APP: System Held in Safe Lockout until Explicit Manual Reset
+    end
+```
 
 <p align="center">
   <img src="images/safety_stack.png" alt="Multi-Tiered Safety Stack" width="760">
 </p>
 
-Safety enforcement is decoupled across four isolated rings:
-
-1. **Planning Boundary Ring (MoveIt):**
-   - Hardware limits are strictly configured in `joint_limits.yaml`.
-   - Max velocity is scaled to $5.0\text{ rad/s}$ ($286.5^\circ/\text{s}$); acceleration is bounded to prevent motor torque saturation.
-   - Trajectory goals requesting poses outside bounds are rejected at the planner level.
-2. **Execution Monitoring Ring (`ros_control`):**
-   - Goal tolerance is constrained to $\pm 0.1\text{ rad}$.
-   - If path execution deviation exceeds threshold, the trajectory action immediately aborts.
-3. **Active Watchdog Supervisor (`safety_node.py`):**
-   - Monitors `/joint_states` at 10 Hz.
-   - Calculates proximity to physical hard limits using a safety buffer:
-     $$\theta_{\text{lower}} + 0.05\text{ rad} \le \theta_i \le \theta_{\text{upper}} - 0.05\text{ rad}$$
-   - If any joint violates this boundary, or if a external stop trigger is detected, the node latches `/emergency_stop` (`True`) and broadcasts cancel requests across all active action servers.
-4. **Physical Hardware Ring:**
-   - Dedicated physical emergency stop cutoffs must disconnect the main 12V motor DC rail on RAMPS 1.4 independently of software state.
-
 ---
 
 ## 🔩 Physical Hardware Implementation
 
-While the workcell runs natively within Gazebo 11, the architecture maps 1:1 onto low-cost physical maker robotics hardware:
+The simulation architecture mirrors low-cost physical maker robotics hardware:
 
 | Hardware Subsystem | Component Specification | Role / Notes |
 |:---|:---|:---|
@@ -448,16 +511,29 @@ rostopic echo /emergency_stop -n 1
 
 ---
 
-## 🔄 Continuous Integration & Validation
+## 🔄 End-to-End CI/CD & Verification Workflow
+
+The automated software quality lifecycle is governed by GitHub Actions:
+
+```mermaid
+flowchart TD
+    PUSH["Git Push / Pull Request to main"] --> RUNNER["Spin Up Ubuntu 20.04 LTS Runner"]
+    
+    RUNNER --> DEP_SETUP["Configure ROS Noetic Apt Repositories<br/>Install python3-rosdep & catkin tools"]
+    
+    DEP_SETUP --> ROSDEP["rosdep init & rosdep update<br/>Resolve all package.xml dependencies"]
+    
+    ROSDEP --> BUILD["Compile Workspace via catkin_make<br/>-DCMAKE_BUILD_TYPE=Release"]
+    
+    BUILD --> TEST{"Compilation & Linking Gate"}
+    
+    TEST -- Errors / Missing Headers --> NOTIFY_FAIL["Workflow Fails (Red Badge)"]
+    TEST -- All 5 Packages Built Cleanly --> NOTIFY_PASS["Workflow Succeeds (Green Badge)"]
+```
 
 <p align="center">
   <img src="images/ci_pipeline.png" alt="CI Pipeline Architecture" width="580">
 </p>
-
-Every push and pull request triggers an automated GitHub Actions workflow (`.github/workflows/ros1-ci.yml`):
-- **Container Environment:** Ubuntu 20.04 LTS runner.
-- **Dependency Isolation:** Automated installation of `ros-noetic-desktop` and fresh `rosdep` keys.
-- **Compilation Gate:** Builds all five workspace packages using `catkin_make` under strict flags to guarantee zero missing headers, unlinked targets, or CMake configuration drift.
 
 ---
 
