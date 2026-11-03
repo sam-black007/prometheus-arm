@@ -1,15 +1,15 @@
-# 6-DOF Robotic Arm — ROS 1 Noetic (Industrial Hardening Baseline)
+# 🦾 PROMETHEUS ARM — 6-DOF Robotic Arm (ROS 1 Industrial Hardening Baseline)
 ### Industrial Reference Architecture: MoveIt! Motion Planning, Analytical IKFast, Gazebo Physics, and Active Safety Interlocks
 
 [![ROS Noetic](https://img.shields.io/badge/ROS-Noetic%20(Ubuntu%2020.04)-brightgreen.svg?logo=ros&logoColor=white)](https://wiki.ros.org/noetic)
 [![MoveIt 1](https://img.shields.io/badge/Motion%20Planning-MoveIt!%201.1-1B4F72.svg)](https://moveit.ros.org/)
 [![Gazebo 11](https://img.shields.io/badge/Simulation-Gazebo%2011-orange.svg?logo=gazebo&logoColor=white)](https://gazebosim.org/)
-[![Kinematics: IKFast](https://img.shields.io/badge/Kinematics-IKFast%20Analytical-purple.svg)](https://github.com/sam-black007/6-dof-robotic-arm-ros1-industrial)
-[![CI Build](https://github.com/sam-black007/6-dof-robotic-arm-ros1-industrial/actions/workflows/ros1-ci.yml/badge.svg)](https://github.com/sam-black007/6-dof-robotic-arm-ros1-industrial/actions/workflows/ros1-ci.yml)
+[![Kinematics: IKFast](https://img.shields.io/badge/Kinematics-IKFast%20Analytical-purple.svg)](https://github.com/sam-black007/prometheus-arm)
+[![CI Build](https://github.com/sam-black007/prometheus-arm/actions/workflows/ros1-ci.yml/badge.svg)](https://github.com/sam-black007/prometheus-arm/actions/workflows/ros1-ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/sam-black007/6-dof-robotic-arm-ros1-industrial/pulls)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/sam-black007/prometheus-arm/pulls)
 
-A production-hardened industrial reference architecture for the **OWR 6-DOF articulated robotic manipulator** equipped with a **Robotiq 2F-140 parallel-jaw adaptive gripper**. 
+**PROMETHEUS ARM** is a production-hardened industrial reference architecture for the **OWR 6-DOF articulated robotic manipulator** equipped with a **Robotiq 2F-140 parallel-jaw adaptive gripper**. 
 
 Designed to transition academic ROS manipulators into predictable, industrially hardened workcells, this repository integrates a high-speed closed-form analytical inverse kinematics solver (**IKFast**), multi-pipeline motion planning (**OMPL, Pilz Industrial Planner, CHOMP, STOMP**), realistic Gazebo physics with high-frequency `ros_control` PID tuning, real-time 3D perception with **OctoMap**, and a dedicated multi-tiered **safety watchdog layer** with latched emergency-stop (`/emergency_stop`) mechanisms.
 
@@ -167,7 +167,7 @@ $$\mathbf{P}_{\text{EEF}}^{\text{world}} = \begin{bmatrix} 0 + 0 + 0 + 0.0695 + 
 ## 📦 Software Stack & Package Ecosystem
 
 ```
-6-dof-robotic-arm-ros1-industrial/
+prometheus-arm/
 ├── owr_description/                             # URDF, Xacro, 3D visual & collision STLs, transmissions
 ├── owr_gazebo/                                  # Gazebo physics worlds, spawn nodes, PID controllers
 ├── owr_moveit_config/                           # SRDF, joint limits, kinematics, multi-pipeline launch
@@ -453,7 +453,7 @@ mkdir -p ~/catkin_ws/src
 cd ~/catkin_ws/src
 
 # Clone the repository
-git clone https://github.com/sam-black007/6-dof-robotic-arm-ros1-industrial.git 6dof
+git clone https://github.com/sam-black007/prometheus-arm.git 6dof
 
 # Resolve package dependencies automatically
 cd ~/catkin_ws
@@ -567,8 +567,8 @@ Detailed engineering reports, math models, and industrial auditing checklists ar
 
 Distributed under the open-source **MIT License**. See [`LICENSE`](LICENSE) for full details.
 
-- **Author & Maintainer:** [sam-black007](https://github.com/sam-black007)
-- **Repository:** [6-dof-robotic-arm-ros1-industrial](https://github.com/sam-black007/6-dof-robotic-arm-ros1-industrial)
+- **Developer & Maintainer:** [sam-black007](https://github.com/sam-black007)
+- **Repository:** [prometheus-arm](https://github.com/sam-black007/prometheus-arm)
 
 ```
 Copyright (c) 2026 sam-black007
